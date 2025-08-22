@@ -3,14 +3,14 @@
 #include <vector>
 #include <queue>
 #include <set>
-#include <map> // Required for std::map
+#include <map>
 #include <utility>
 #include <regex>
 #include <thread>
 #include <mutex>
 #include <atomic>
 #include <chrono>
-#include <fstream> // Required for file output (std::ofstream)
+#include <fstream>
 
 #include <cpr/cpr.h>
 
@@ -19,10 +19,8 @@ struct CrawlerState {
     std::mutex mtx; 
     std::queue<std::pair<std::string, int>> to_visit;
     std::set<std::string> visited;
-    // NEW: A map to store results grouped by depth
-    std::map<int, std::vector<std::string>> results_by_depth;
+    std::map<int, std::vector<std::pair<std::string, bool>>> results_by_depth;
 };
-
 
 std::string download_page(const std::string& url) {
     try {
@@ -59,7 +57,6 @@ std::set<std::string> find_links(const std::string& html_body) {
     return links;
 }
 
-// --- Worker thread logic (Updated to store mapped results) ---
 void worker(int id, CrawlerState& state, int max_depth, std::atomic<int>& tasks_in_progress) {
     while (true) {
         std::pair<std::string, int> current_task;
@@ -91,15 +88,15 @@ void worker(int id, CrawlerState& state, int max_depth, std::atomic<int>& tasks_
             if (current_depth <= max_depth) {
                 std::cout << "[Thread " << id << "][Depth " << current_depth << "] Crawling: " << current_url << std::endl;
                 
-                // NEW: Store the successful crawl in the results map
+                std::string html = download_page(current_url);
+                bool success = !html.empty();
+
                 {
                     std::lock_guard<std::mutex> guard(state.mtx);
-                    state.results_by_depth[current_depth].push_back(current_url);
+                    state.results_by_depth[current_depth].push_back({current_url, success});
                 }
 
-                std::string html = download_page(current_url);
-
-                if (!html.empty()) {
+                if (success) {
                     std::set<std::string> new_links = find_links(html);
                     {
                         std::lock_guard<std::mutex> guard(state.mtx);
@@ -110,11 +107,10 @@ void worker(int id, CrawlerState& state, int max_depth, std::atomic<int>& tasks_
                             }
                         }
                     }
-                }  else {
-    std::cout << "[Thread " << id << "][Depth " << current_depth 
-              << "] Failed to process: " << current_url << std::endl;
-}
-                
+                } else {
+                    std::cout << "[Thread " << id << "][Depth " << current_depth 
+                             << "] Failed to process: " << current_url << std::endl;
+                }
             }
             tasks_in_progress--;
         } else {
@@ -123,7 +119,6 @@ void worker(int id, CrawlerState& state, int max_depth, std::atomic<int>& tasks_
     }
 }
 
-// --- Main function (Updated to save mapped results) ---
 int main(int argc, char* argv[]) {
     if (argc != 3) {
         std::cerr << "Usage: ./web_crawler <starting_url> <depth>" << std::endl;
@@ -152,24 +147,60 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\nCrawling finished. Visited " << state.visited.size() << " unique pages." << std::endl;
 
-    // --- UPDATED: Save mapped results to a file ---
-    std::cout << "Saving results to results.txt..." << std::endl;
+    // Save processed URLs
+    std::cout << "Saving processed results to results.txt..." << std::endl;
     std::ofstream output_file("results.txt");
     if (output_file.is_open()) {
-        // Iterate through the map, which is naturally sorted by depth
+        output_file << "Total visited URLs: " << state.visited.size() << "\n\n";
+        
         for (const auto& pair : state.results_by_depth) {
             output_file << "--- Depth " << pair.first << " ---\n";
-            for (const auto& url : pair.second) {
-                output_file << url << "\n";
+            
+            int success_count = 0;
+            int failed_count = 0;
+            
+            for (const auto& [url, success] : pair.second) {
+                output_file << (success ? "[Success] " : "[Failed]  ") << url << "\n";
+                success ? success_count++ : failed_count++;
             }
-            output_file << "\n"; // Add a blank line for readability
+            
+            output_file << "\nDepth " << pair.first << " Summary:\n";
+            output_file << "Successful: " << success_count << "\n";
+            output_file << "Failed: " << failed_count << "\n";
+            output_file << "Total: " << success_count + failed_count << "\n\n";
         }
         output_file.close();
-        std::cout << "Successfully saved results." << std::endl;
+        std::cout << "Successfully saved processed results." << std::endl;
     } else {
         std::cerr << "Error: Could not open results.txt for writing." << std::endl;
     }
-    // --- End of updated code ---
+
+    // Save all visited URLs
+    std::cout << "Saving all visited URLs to all_visited.txt..." << std::endl;
+    std::ofstream visited_file("all_visited.txt");
+    if (visited_file.is_open()) {
+        visited_file << "Total visited URLs: " << state.visited.size() << "\n\n";
+        
+        // Write all URLs from the visited set
+        for (const auto& url : state.visited) {
+            // Check if this URL was processed (exists in results_by_depth)
+            bool was_processed = false;
+            for (const auto& [depth, urls] : state.results_by_depth) {
+                for (const auto& [processed_url, success] : urls) {
+                    if (processed_url == url) {
+                        was_processed = true;
+                        break;
+                    }
+                }
+                if (was_processed) break;
+            }
+            visited_file << (was_processed ? "[Processed] " : "[Unprocessed] ") << url << "\n";
+        }
+        visited_file.close();
+        std::cout << "Successfully saved all visited URLs." << std::endl;
+    } else {
+        std::cerr << "Error: Could not open all_visited.txt for writing." << std::endl;
+    }
 
     return 0;
 }
