@@ -16,7 +16,7 @@ A multi-threaded web crawler implemented in C++ that efficiently crawls websites
 
 - CMake (version 3.15 or higher)
 - C++17 compatible compiler
-- pthread support
+- pthread/Win32 threads support (project uses cpp standard thread)
 - Internet connection
 - CPR library (automatically fetched by CMake)
 
