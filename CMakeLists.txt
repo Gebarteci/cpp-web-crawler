@@ -3,7 +3,9 @@ project(WebCrawler)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
+
+# Platform-independent threading
+find_package(Threads REQUIRED)
 
 include(FetchContent)
 
@@ -17,9 +19,9 @@ FetchContent_MakeAvailable(cpr)
 
 add_executable(web_crawler src/main.cpp)
 
-# We only need to link cpr now!
 target_link_libraries(
   web_crawler
   PRIVATE
   cpr::cpr
+  Threads::Threads  # Platform-independent threading
 )
