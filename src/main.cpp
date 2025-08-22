@@ -23,11 +23,19 @@ struct CrawlerState {
     std::map<int, std::vector<std::string>> results_by_depth;
 };
 
-// --- HTTP and Parsing functions (remain the same) ---
+
 std::string download_page(const std::string& url) {
-    cpr::Response r = cpr::Get(cpr::Url{url});
-    if (r.status_code == 200) {
-        return r.text;
+    try {
+        cpr::Response r = cpr::Get(cpr::Url{url});
+        if (r.status_code == 200) {
+            return r.text;
+        } else {
+            std::cerr << "[Error] Failed to download " << url 
+                      << " (Status code: " << r.status_code << ")" << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[Error] Exception while downloading " << url 
+                  << ": " << e.what() << std::endl;
     }
     return "";
 }
@@ -102,7 +110,11 @@ void worker(int id, CrawlerState& state, int max_depth, std::atomic<int>& tasks_
                             }
                         }
                     }
-                }
+                }  else {
+    std::cout << "[Thread " << id << "][Depth " << current_depth 
+              << "] Failed to process: " << current_url << std::endl;
+}
+                
             }
             tasks_in_progress--;
         } else {
