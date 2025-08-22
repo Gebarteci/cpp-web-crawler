@@ -3,12 +3,27 @@
 #include <vector>
 #include <queue>
 #include <set>
+#include <map> // Required for std::map
 #include <utility>
-#include <regex> // Required for regular expressions
+#include <regex>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <chrono>
+#include <fstream> // Required for file output (std::ofstream)
 
 #include <cpr/cpr.h>
 
-// --- HTTP Function (remains the same) ---
+// --- Shared data structures ---
+struct CrawlerState {
+    std::mutex mtx; 
+    std::queue<std::pair<std::string, int>> to_visit;
+    std::set<std::string> visited;
+    // NEW: A map to store results grouped by depth
+    std::map<int, std::vector<std::string>> results_by_depth;
+};
+
+// --- HTTP and Parsing functions (remain the same) ---
 std::string download_page(const std::string& url) {
     cpr::Response r = cpr::Get(cpr::Url{url});
     if (r.status_code == 200) {
@@ -17,45 +32,86 @@ std::string download_page(const std::string& url) {
     return "";
 }
 
-// --- NEW: URL Resolution Function ---
-// Converts relative URLs (e.g., "/about") to absolute URLs.
 std::string resolve_url(const std::string& base_url, const std::string& link) {
-    if (link.rfind("http", 0) == 0) {
-        return link; // Already an absolute link
-    }
-
-    // Find the end of the domain name
-    size_t end_of_domain = base_url.find('/', 8); // Start search after "https://"
+    if (link.rfind("http", 0) == 0) return link;
+    size_t end_of_domain = base_url.find('/', 8);
     std::string domain = base_url.substr(0, end_of_domain);
-
-    if (link.rfind("/", 0) == 0) {
-        return domain + link; // Link starts with '/', relative to domain root
-    }
-    
-    // For this project, we'll ignore more complex relative links
+    if (link.rfind("/", 0) == 0) return domain + link;
     return ""; 
 }
 
-// --- Parsing Function (Updated to use Regex) ---
 std::set<std::string> find_links(const std::string& html_body) {
     std::set<std::string> links;
-    // This regex finds href attributes in <a> tags
     std::regex link_regex("<a\\s+[^>]*href\\s*=\\s*[\"'](.*?)[\"']");
-    
-    // Use an iterator to find all matches in the HTML
     auto words_begin = std::sregex_iterator(html_body.begin(), html_body.end(), link_regex);
     auto words_end = std::sregex_iterator();
-
     for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
-        std::smatch match = *i;
-        if (match.size() > 1) {
-            links.insert(match[1].str()); // match[1] is the captured group (the URL)
-        }
+        if (i->size() > 1) links.insert((*i)[1].str());
     }
     return links;
 }
 
-// --- Main Loop (Updated to use resolve_url) ---
+// --- Worker thread logic (Updated to store mapped results) ---
+void worker(int id, CrawlerState& state, int max_depth, std::atomic<int>& tasks_in_progress) {
+    while (true) {
+        std::pair<std::string, int> current_task;
+        bool have_task = false;
+
+        {
+            std::lock_guard<std::mutex> guard(state.mtx);
+            if (state.to_visit.empty()) {
+                if (tasks_in_progress.load() == 0) {
+                    return;
+                }
+            } else {
+                current_task = state.to_visit.front();
+                state.to_visit.pop();
+
+                if (state.visited.count(current_task.first)) {
+                    continue;
+                }
+
+                state.visited.insert(current_task.first);
+                tasks_in_progress++;
+                have_task = true;
+            }
+        }
+
+        if (have_task) {
+            auto [current_url, current_depth] = current_task;
+
+            if (current_depth <= max_depth) {
+                std::cout << "[Thread " << id << "][Depth " << current_depth << "] Crawling: " << current_url << std::endl;
+                
+                // NEW: Store the successful crawl in the results map
+                {
+                    std::lock_guard<std::mutex> guard(state.mtx);
+                    state.results_by_depth[current_depth].push_back(current_url);
+                }
+
+                std::string html = download_page(current_url);
+
+                if (!html.empty()) {
+                    std::set<std::string> new_links = find_links(html);
+                    {
+                        std::lock_guard<std::mutex> guard(state.mtx);
+                        for (const auto& link : new_links) {
+                            std::string absolute_link = resolve_url(current_url, link);
+                            if (!absolute_link.empty()) {
+                                state.to_visit.push({absolute_link, current_depth + 1});
+                            }
+                        }
+                    }
+                }
+            }
+            tasks_in_progress--;
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+}
+
+// --- Main function (Updated to save mapped results) ---
 int main(int argc, char* argv[]) {
     if (argc != 3) {
         std::cerr << "Usage: ./web_crawler <starting_url> <depth>" << std::endl;
@@ -65,44 +121,43 @@ int main(int argc, char* argv[]) {
     std::string start_url = argv[1];
     int max_depth = std::stoi(argv[2]);
 
-    std::queue<std::pair<std::string, int>> to_visit;
-    to_visit.push({start_url, 0});
+    const unsigned int num_threads = std::thread::hardware_concurrency();
+    std::cout << "Using " << num_threads << " threads for crawling." << std::endl;
 
-    std::set<std::string> visited;
+    CrawlerState state;
+    state.to_visit.push({start_url, 0});
 
-    while (!to_visit.empty()) {
-        auto [current_url, current_depth] = to_visit.front();
-        to_visit.pop();
+    std::vector<std::thread> threads;
+    std::atomic<int> tasks_in_progress = {0};
 
-        if (visited.count(current_url)) {
-            continue;
-        }
-        
-        if (current_depth > max_depth) {
-            continue;
-        }
-
-        std::cout << "[Depth " << current_depth << "] Crawling: " << current_url << std::endl;
-        visited.insert(current_url);
-
-        std::string html = download_page(current_url);
-        if (html.empty()) {
-            std::cout << "  -> Failed to download." << std::endl;
-            continue;
-        }
-
-        std::set<std::string> new_links = find_links(html);
-        std::cout << "  -> Found " << new_links.size() << " links." << std::endl;
-
-        for (const auto& link : new_links) {
-            // Resolve the link to an absolute URL
-            std::string absolute_link = resolve_url(current_url, link);
-            if (!absolute_link.empty() && visited.find(absolute_link) == visited.end()) {
-                to_visit.push({absolute_link, current_depth + 1});
-            }
-        }
+    for (unsigned int i = 0; i < num_threads; ++i) {
+        threads.emplace_back(worker, i + 1, std::ref(state), max_depth, std::ref(tasks_in_progress));
     }
 
-    std::cout << "\nCrawling finished. Visited " << visited.size() << " unique pages." << std::endl;
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    std::cout << "\nCrawling finished. Visited " << state.visited.size() << " unique pages." << std::endl;
+
+    // --- UPDATED: Save mapped results to a file ---
+    std::cout << "Saving results to results.txt..." << std::endl;
+    std::ofstream output_file("results.txt");
+    if (output_file.is_open()) {
+        // Iterate through the map, which is naturally sorted by depth
+        for (const auto& pair : state.results_by_depth) {
+            output_file << "--- Depth " << pair.first << " ---\n";
+            for (const auto& url : pair.second) {
+                output_file << url << "\n";
+            }
+            output_file << "\n"; // Add a blank line for readability
+        }
+        output_file.close();
+        std::cout << "Successfully saved results." << std::endl;
+    } else {
+        std::cerr << "Error: Could not open results.txt for writing." << std::endl;
+    }
+    // --- End of updated code ---
+
     return 0;
 }
